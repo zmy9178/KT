@@ -251,12 +251,18 @@ def sim_wj(
         z0=data_mscq[1],
     )
 
+
+
+    #改为弧度制
     if data_66.size:
         last_speed = data_66[-1, 0]
-        last_angle = np.deg2rad(data_66[-1, 1])
+        last_angle = data_66[-1, 1]
         initial_horizontal = last_speed * cos(last_angle)
     else:
         initial_horizontal = vx0
+
+
+
 
     initial = np.array(
         [beta0, theta0, u0, w0, x0, vx0, initial_horizontal, 0.0, 0.0, 0.0],

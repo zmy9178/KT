@@ -83,18 +83,28 @@ def jiansu_straight(
 
     cmy = vehicle.hull_cmx
     jiansusan_diam = sqrt(decechute.aera / pi) * 2.0
-    nume = data_stage_2[2] - (vehicle.track_fdy - cmy)
-    deno = vehicle.cmpull_h + pullchute.rope_length
 
+
+
+     #修复减速伞整理阶段的同类跳变
     initial = np.zeros(6, dtype=float)
     initial[0] = -1.0 * data_stage_2[0]
     initial[1] = -1.0 * data_stage_2[2]
-    initial[2] = atan(nume / deno)
-    lvx = drop_envi.airplane_velo / 3.6 + data_stage_2[1]
-    lvy = data_stage_2[3]
-    initial[3] = lvx * cos(initial[2]) + lvy * sin(initial[2])
+    #继承进入本阶段前的实际速度向量
+    incoming_vx = drop_envi.airplane_velo / 3.6 + data_stage_2[1]
+    incoming_vy = data_stage_2[3]
+
+
+    initial[2] = np.arctan2(incoming_vy, incoming_vx)
+    initial[3] = np.hypot(incoming_vx, incoming_vy)
     initial[4] = initial[3]
     initial[5] = 0.0
+
+
+
+
+
+
 
     lsh = decechute.rope_length
     lxt = decechute.rope_length + jiansusan_diam / 2.0 + decechute.chute_width
