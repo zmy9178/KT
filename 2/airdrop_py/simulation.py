@@ -165,9 +165,8 @@ def run_full_simulation(
     data_66 = result["data_66"]
 
     def velocity_components(data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        angle = data[:, 1]
-        # MATLAB uses cosd/sind for these post-processing conversions.
-        angle_rad = np.deg2rad(angle)
+        angle_rad = data[:, 1]
+        #统一变量单位为弧度制，参考2/伞降稳降连续过渡改进方案.md改动一个人意见
         return data[:, 0] * np.cos(angle_rad), data[:, 0] * np.sin(angle_rad)
 
     v3_x, v3_y = velocity_components(data_33)
@@ -296,32 +295,59 @@ def run_full_simulation(
             ctx,
             duration=steady_duration,
         )
-        time_all = np.concatenate(
-            (time_pre_steady, time_wj + time_pre_steady[-1])
-        )
+
+
+
+
+        #稳降阶段的列顺序与 data_pre_steady 保持一致
+        #避免伞降阶段和稳降阶段在交接点重复一行
+
         force_wj = (
             np.abs(data_wj[:, 6] / ctx.vehicle.dropmass / 1000.0)
             if len(data_wj)
             else np.empty(0, dtype=float)
         )
+        #计算稳降阶段载荷
+
+        #稳降函数内部坐标名和最终 CSV 坐标名不是完全一致，需要在这里重新映射
+        steady_data = np.column_stack(
+            (     
+                x_wj,
+                ctx.drop_envi.drophight - z_wj, #Y位置离地高度
+                y_wj,                           #Z位置侧向位移
+                vx_wj,
+                vz_wj,                          #Y速度垂直速度
+                vy_wj,                          #Z速度侧向速度
+                90.0 - data_wj[:, 1],
+                data_wj[:, 0],
+                force_wj,
+            )
+        )
+
+
+        #替换原始稳降阶段数据，避免重复一行，
+        if len(time_wj) and np.isclose(time_wj[0], 0.0):
+            time_wj_output = time_wj[1:]
+            steady_data_output = steady_data[1:]
+        else:
+            time_wj_output = time_wj
+            steady_data_output = steady_data
+
+        #拼接时间和数据，形成完整的时间序列和数据序列
+        time_all = np.concatenate(
+            (time_pre_steady, time_wj_output + time_pre_steady[-1])
+        )
         data_all = np.vstack(
             (
                 data_pre_steady,
-                np.column_stack(
-                    (
-                        x_wj,
-                        ctx.drop_envi.drophight - z_wj,
-                        y_wj,
-                        vx_wj,
-                        vz_wj,
-                        vy_wj,
-                        90.0 - data_wj[:, 1],
-                        data_wj[:, 0],
-                        force_wj,
-                    )
-                ),
+                steady_data_output,
             )
         )
+
+
+
+
+
         result.update(
             {
                 "time_wj": time_wj,

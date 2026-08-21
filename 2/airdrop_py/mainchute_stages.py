@@ -142,22 +142,24 @@ def zhusan_straight(
     sim = ctx.sim
 
     _, main_length, dece_length = _mainchute_lengths(ctx)
-    nume = data_stage_2[1] - (vehicle.track_fdy - vehicle.hull_cmy)
-    deno = vehicle.cmpull_h + pullchute.rope_length
-    trajectory_angle = atan(nume / deno)
 
-    # The MATLAB source uses sind/cosd for this conversion.
-    velocity_angle = np.deg2rad(data_stage_2[2])
-    lvx = data_stage_2[3] * sin(velocity_angle)
-    lvy = data_stage_2[3] * cos(velocity_angle)
+
+    # data_stage_2[2] 是上一阶段的轨迹角，单位为弧度。
+    # 直接继承上一阶段速度状态，避免阶段交接时速度方向瞬间跳变。继承的是弧度，没有重新用几何位置计算一个新的 trajectory_angle。
+    trajectory_angle = float(data_stage_2[2])
+    initial_speed = float(data_stage_2[3])
 
     initial = np.zeros(6, dtype=float)
     initial[0] = data_stage_2[0]
     initial[1] = data_stage_2[1]
     initial[2] = trajectory_angle
-    initial[3] = lvx * cos(trajectory_angle) + lvy * sin(trajectory_angle)
-    initial[4] = initial[3]
+    initial[3] = initial_speed
+    initial[4] = initial_speed
     initial[5] = data_jslz[5]
+
+
+
+
 
     lxt = main_length + dece_length
     t_grid = matlab_time_grid(0.0, sim.time, sim.step)
