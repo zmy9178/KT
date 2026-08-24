@@ -7,6 +7,66 @@ import numpy as np
 from .models import AirdropContext
 from .numerics import matlab_time_grid, solve_on_matlab_grid
 
+def _decechute_released_mass(
+    deployed_length : float,
+    ctx : AirdropContext,
+) -> tuple[float,float]:
+    #返回已拉出质量和单位展开长度对应的质量
+
+    decechute = ctx.decechute
+
+    rope_length = decechute.rope_length
+    band_length = decechute.chute_width
+    canopy_diameter = 2.0 * sqrt(decechute.aera / pi)
+    canopy_length = canopy_diameter /2.0
+    total_length = rope_length + band_length + canopy_length
+
+    length = float(np.clip(deployed_length, 0.0, total_length))
+
+    if length <= rope_length:
+        mass_per_length = decechute.rope_mass / rope_length
+        released_mass = mass_per_length * length
+        return released_mass, mass_per_length
+
+    if length <= rope_length + band_length:
+        band_deployed = length - rope_length
+        mass_per_length = decechute.chute_side_mass / band_length
+        released_mass = (
+            decechute.rope_mass
+            + mass_per_length * band_deployed
+        )
+        return released_mass, mass_per_length
+
+    canopy_deployed = length - rope_length - band_length
+    progress = np.clip(canopy_deployed / canopy_length, 0.0, 1.0)
+
+    remaining_canopy_mass = (
+        decechute.mass
+        - decechute.rope_mass
+        - decechute.chute_side_mass
+    )
+
+    # 2p - p^2：起点和终点质量连续，终点导数自然降为零。
+    released_canopy_mass = remaining_canopy_mass * (
+        2.0 * progress - progress**2
+    )
+
+    released_mass = (
+        decechute.rope_mass
+        + decechute.chute_side_mass
+        + released_canopy_mass
+    )
+
+    mass_per_length = (
+        remaining_canopy_mass
+        * 2.0
+        * (1.0 - progress)
+        / canopy_length
+    )
+
+    return released_mass, mass_per_length
+
+
 
 def ode45_stage3(_t: float, y: np.ndarray, ctx: AirdropContext) -> np.ndarray:
     """MATLAB ``ode45_stage3``: deceleration parachute straightening."""
@@ -40,31 +100,22 @@ def ode45_stage3(_t: float, y: np.ndarray, ctx: AirdropContext) -> np.ndarray:
     qw = 0.5 * rho * ca_w * vehicle.hull_l * vehicle.hull_w * y[4] ** 2
     qe = 0.5 * rho * ca_e * y[3] ** 2
 
-    if y[5] <= lsh:
-        me = msh1 * y[5]
-        dmi = msh1
-    elif y[5] <= lsh + b:
-        # Keep the MATLAB expression exactly, including its unshifted y(6).
-        me = msh1 * lsh + msy1 * y[5]
-        dmi = msy1
-    elif y[5] <= lxt:
-        me = msh1 * lsh + msy1 * b + (msy - msy1 * b) * (1.0 - 4.0 * ((lxt - y[5]) / do) ** 2)
-        dmi = 8.0 * (msy - msy1 * b) * (lxt - y[5]) / do**2
-    else:
-        me = 0.0
-        dmi = 0.01
+    released_mass, mass_per_length = _decechute_released_mass(
+        y[5],
+        ctx,
+    )
 
-    mv = msh + msy - me
-    relative_velocity = y[4] - y[3]
-    fl = dmi * relative_velocity**2 + fsh
+    remaining_mass = decechute.mass - released_mass
+    relative_velocity = max(y[4]-y[3], 0.0)
+    f1 = fsh + mass_per_length * relative_velocity**2
 
     dy = np.zeros(6, dtype=float)
     dy[0] = y[4] * cos(y[2])
     dy[1] = y[4] * sin(y[2])
     dy[2] = g * cos(y[2]) / y[4]
-    dy[3] = g * sin(y[2]) - (qys + qd - fsh) / (mys + mv)
-    dy[4] = g * sin(y[2]) - (qw + qe + fl) / (mw + me)
-    dy[5] = sqrt((fl - fsh) / dmi)
+    dy[3] = g * sin(y[2]) - (qys + qd - f1) / (mys + released_mass)
+    dy[4] = g * sin(y[2]) - (qw + qe + f1) / (mw + remaining_mass)
+    dy[5] = relative_velocity      #车辆速度-伞包速度=拉出长度增长率
     return dy
 
 
@@ -117,13 +168,59 @@ def jiansu_straight(
     ca_w = vehicle.resist_hull
 
     t_grid = matlab_time_grid(0.0, sim.time, sim.step)
-    time_3, data_3 = solve_on_matlab_grid(lambda t, y: ode45_stage3(t, y, ctx), t_grid, initial)
 
-    hit = np.nonzero(data_3[:, 5] >= lxt)[0]
-    if hit.size == 0:
-        raise RuntimeError("jiansu_straight did not reach the MATLAB stop condition")
-    nn = int(hit[0])
-    time_jslz = float(time_3[nn])
+    def straightening_complete_event(
+        _t: float,
+        y: np.ndarray,
+    ) -> float:
+        # y[5] 是当前已拉出长度；达到 lxt 时整理阶段结束。
+        return float(y[5] - lxt)
+
+    # 找到事件后立即停止积分。
+    straightening_complete_event.terminal = True
+
+    # 只检测 y[5] 从小于 lxt 增长到大于 lxt 的穿越。
+    straightening_complete_event.direction = 1
+
+    solution = solve_on_matlab_grid(
+        lambda t, y: ode45_stage3(t, y, ctx),
+        t_grid,
+        initial,
+        events=straightening_complete_event,
+        return_result=True,
+    )
+
+    if (
+        len(solution.t_events) == 0
+        or solution.t_events[0].size == 0
+    ):
+        raise RuntimeError(
+            "jiansu_straight did not reach the straightening-complete event"
+        )
+
+    # 求解器计算出的准确事件时刻和状态。
+    time_jslz = float(solution.t_events[0][0])
+    event_state = solution.y_events[0][0].copy()
+
+    # t_eval 返回事件发生前的固定网格点。
+    time_3 = solution.t.copy()
+    data_3 = solution.y.T.copy()
+
+    # 事件一般发生在两个固定输出时刻之间，因此手动补入准确事件点。
+    if (
+        time_3.size == 0
+        or not np.isclose(
+            time_3[-1],
+            time_jslz,
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+    ):
+        time_3 = np.append(time_3, time_jslz)
+        data_3 = np.vstack((data_3, event_state))
+
+    # 事件点现在是该阶段最后一个数据点。
+    nn = len(time_3) - 1
 
     vr = data_3[:, 4] - data_3[:, 3]
     m = len(time_3)

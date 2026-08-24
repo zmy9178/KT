@@ -151,9 +151,27 @@ def run_full_simulation(
         result["data_2"],
         result["time_fz"],
     )
+    time_exit_1 = result["time_1"][: len(exit_stage_1)]
+    time_exit_2 = result["time_2"][: len(exit_stage_2)]
+
+    plane_speed = ctx.drop_envi.airplane_velo / 3.6
+
+    #地面水平坐标及速度
+    x_exit_1 = plane_speed * time_exit_1 + exit_stage_1[:, 0]
+    x_exit_2 = x_exit_1[-1] + plane_speed * time_exit_2 + exit_stage_2[:, 0] - exit_stage_2[0, 0]
+    vx_exit_1 = plane_speed + exit_stage_1[:, 1]
+    vx_exit_2 = plane_speed + exit_stage_2[:, 1]
+
+    # 出舱状态中的 y[2] 是垂向位置，定义向下为正
+    down_exit_1 = exit_stage_1[:, 2] - exit_stage_1[0, 2]
+    down_exit_2 = (
+        down_exit_1[-1] + exit_stage_2[:, 2] - exit_stage_2[0, 2]
+    )
+
+    # 阶段二第一个样本和阶段一最后一个样本是同一个交接点
     data_cc_1 = np.zeros((len(exit_stage_1), 6), dtype=float)
     data_cc_1[:, :4] = exit_stage_1
-    data_cc = np.vstack((data_cc_1, exit_stage_2))
+    data_cc = np.vstack((data_cc_1, exit_stage_2[1:]))
 
     data_3 = result["data_3"]
     data_4 = result["data_4"]
@@ -163,6 +181,28 @@ def run_full_simulation(
     data_44 = result["data_44"]
     data_55 = result["data_55"]
     data_66 = result["data_66"]
+
+    # 每个 data_N都是有效输出前缀，对应时间也截取到相同长度
+    time_stage_3 = result["time_3"][: len(data_3)]
+    time_stage_4 = result["time_4"][: len(data_4)]
+    time_stage_5 = result["time_5"][: len(data_5)]
+    time_stage_6 = result["time_6"][: len(data_6)]
+
+    #阶段 3 的坐标原点与出舱阶段不同
+    #添加固定偏移，使阶段 3 首点等于就阶段 2 的末点
+    x_offset = x_exit_2[-1] - data_3[0, 0]
+    down_offset = down_exit_2[-1] - data_3[0, 1]
+
+    #后续阶段首行和上阶段末行重复，输出时去掉首行
+    data_3_out = data_3[1:]
+    data_4_out = data_4[1:]
+    data_5_out = data_5[1:]
+    data_6_out = data_6[1:]
+
+    data_33_out = data_33[1:]
+    data_44_out = data_44[1:]
+    data_55_out = data_55[1:]
+    data_66_out = data_66[1:]
 
     def velocity_components(data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         angle_rad = data[:, 1]
@@ -174,96 +214,136 @@ def run_full_simulation(
     v5_x, v5_y = velocity_components(data_55[:, :2])
     v6_x, v6_y = velocity_components(data_66)
 
-    vehicle_x = np.concatenate(
-        (
-            -data_cc[:, 0],
-            data_3[:, 0],
-            data_4[:, 0],
-            data_5[:, 0],
-            data_6[:, 0],
-        )
-    )
-    vehicle_y = np.concatenate(
-        (
-            data_cc[:, 2],
-            data_3[:, 1],
-            data_4[:, 1],
-            data_5[:, 1],
-            data_6[:, 1],
-        )
-    )
-    velocity_x = np.concatenate(
-        (
-            ctx.drop_envi.airplane_velo / 3.6 + data_cc[:, 1],
-            v3_x,
-            v4_x,
-            v5_x,
-            v6_x,
-        )
-    )
-    velocity_y = np.concatenate(
-        (
-            data_cc[:, 3],
-            v3_y,
-            v4_y,
-            v5_y,
-            v6_y,
-        )
-    )
-    chute_angle = np.concatenate(
-        (
-            np.zeros(len(data_cc), dtype=float),
-            data_3[:, 2],
-            data_4[:, 2],
-            data_5[:, 2],
-            data_6[:, 2],
-        )
-    )
-    pitch_angle = np.concatenate(
-        (
-            data_cc[:, 4],
-            data_3[:, 6],
-            data_4[:, 4],
-            data_5[:, 6],
-            data_6[:, 5],
-        )
-    )
-    pitch_rate = np.concatenate(
-        (
-            data_cc[:, 5],
-            data_3[:, 7],
-            data_4[:, 5],
-            data_5[:, 7],
-            data_6[:, 6],
-        )
-    )
-    rope_force = np.concatenate(
-        (
-            np.zeros(len(data_cc), dtype=float),
-            data_3[:, 8],
-            data_4[:, 6],
-            data_5[:, 8],
-            data_6[:, 4],
-        )
-    )
-    vehicle_speed = np.concatenate(
-        (
-            ctx.drop_envi.airplane_velo / 3.6 + data_cc[:, 1],
-            data_33[:, 0],
-            data_44[:, 0],
-            data_55[:, 0],
-            data_66[:, 0],
-        )
+    #出舱阶段相对于释放点的向下位移。
+    down_exit_1 = exit_stage_1[:, 2] - exit_stage_1[0,2]
+    down_exit_2 = (
+        down_exit_1[-1] + exit_stage_2[:, 2] - exit_stage_2[0, 2]
     )
 
-    time_pre_steady = np.arange(len(vehicle_x), dtype=float) * sim.step
-    # Match MATLAB's final data_all order:
-    # X, height, lateral displacement, X speed, vertical speed,
-    # lateral speed, pitch angle, roll angle, overload.
+    #后续阶段使用了另一位置原点，将其统一到地面坐标系
+    x_offset = x_exit_2[-1] - data_3[0, 0]
+    down_offset = down_exit_2[-1] - data_3[0, 1]
+
+    vehicle_x = np.concatenate(
+      (
+          x_exit_1,
+          x_exit_2[1:],
+          data_3_out[:, 0] + x_offset,
+          data_4_out[:, 0] + x_offset,
+          data_5_out[:, 0] + x_offset,
+          data_6_out[:, 0] + x_offset,
+      )
+    )
+
+    downward_position = np.concatenate(
+      (
+          down_exit_1,
+          down_exit_2[1:],
+          data_3_out[:, 1] + down_offset,
+          data_4_out[:, 1] + down_offset,
+          data_5_out[:, 1] + down_offset,
+          data_6_out[:, 1] + down_offset,
+      )
+    )
+
+    velocity_x = np.concatenate(
+      (
+          vx_exit_1,
+          vx_exit_2[1:],
+          v3_x[1:],
+          v4_x[1:],
+          v5_x[1:],
+          v6_x[1:],
+      )
+    )
+
+    downward_velocity = np.concatenate(
+      (
+          exit_stage_1[:, 3],
+          exit_stage_2[1:, 3],
+          v3_y[1:],
+          v4_y[1:],
+          v5_y[1:],
+          v6_y[1:],
+      )
+    )
+
+    # CSV 中 Y 是离地高度，正方向向上。
+    velocity_y = -downward_velocity
+
+    chute_angle = np.concatenate(
+      (
+          np.zeros(len(data_cc), dtype=float),
+          data_3_out[:, 2],
+          data_4_out[:, 2],
+          data_5_out[:, 2],
+          data_6_out[:, 2],
+      )
+    )
+
+    pitch_angle = np.concatenate(
+      (
+          data_cc[:, 4],
+          data_3_out[:, 6],
+          data_4_out[:, 4],
+          data_5_out[:, 6],
+          data_6_out[:, 5],
+      )
+    )
+
+    pitch_rate = np.concatenate(
+      (
+          data_cc[:, 5],
+          data_3_out[:, 7],
+          data_4_out[:, 5],
+          data_5_out[:, 7],
+          data_6_out[:, 6],
+      )
+    )
+
+    rope_force = np.concatenate(
+      (
+          np.zeros(len(data_cc), dtype=float),
+          data_3_out[:, 8],
+          data_4_out[:, 6],
+          data_5_out[:, 8],
+          data_6_out[:, 4],
+      )
+    )
+
+    vehicle_speed = np.concatenate(
+      (
+          plane_speed + data_cc[:, 1],
+          data_33_out[:, 0],
+          data_44_out[:, 0],
+          data_55_out[:, 0],
+          data_66_out[:, 0],
+      )
+    )
+
+    #替换伪造的固定时间
+    time_parts = [time_exit_1]
+    elapsed = float(time_exit_1[-1])
+
+    for stage_time in (
+        time_exit_2,
+        time_stage_3,
+        time_stage_4,
+        time_stage_5,
+        time_stage_6,
+    ):
+        #从每个阶段的时间从 0 开始，将其转换成连续的全局时间
+        global_stage_time = elapsed + stage_time[1:]
+        time_parts.append(global_stage_time)
+        #当前阶段结束后的累计全局时间
+        elapsed += float(stage_time[-1])
+    time_pre_steady = np.concatenate(time_parts)
+
+    #修正高度列
     data_pre_steady = np.column_stack(
         (
             vehicle_x,
-            ctx.drop_envi.drophight - vehicle_y,
+            ctx.drop_envi.drophight - downward_position,  
             np.zeros(len(vehicle_x), dtype=float),
             velocity_x,
             velocity_y,
@@ -279,6 +359,12 @@ def run_full_simulation(
             [ctx.drop_envi.wind_x, ctx.drop_envi.wind_y, 0.0],
             dtype=float,
         )
+
+        #主伞充气阶段末端坐标转换到统一的全局坐标系
+        steady_initial = np.asarray(result["data_mscq"],dtype=float).copy()
+        steady_initial[0] += x_offset
+        steady_initial[1] += down_offset
+
         (
             time_wj,
             data_wj,
@@ -289,7 +375,7 @@ def run_full_simulation(
             vy_wj,
             vz_wj,
         ) = sim_wj(
-            result["data_mscq"],
+            steady_initial,
             wind,
             data_66,
             ctx,
@@ -316,7 +402,7 @@ def run_full_simulation(
                 ctx.drop_envi.drophight - z_wj, #Y位置离地高度
                 y_wj,                           #Z位置侧向位移
                 vx_wj,
-                vz_wj,                          #Y速度垂直速度
+                -vz_wj,                          #Y速度垂直速度
                 vy_wj,                          #Z速度侧向速度
                 90.0 - data_wj[:, 1],
                 data_wj[:, 0],
@@ -343,9 +429,6 @@ def run_full_simulation(
                 steady_data_output,
             )
         )
-
-
-
 
 
         result.update(
