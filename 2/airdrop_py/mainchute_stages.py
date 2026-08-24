@@ -112,8 +112,11 @@ def ode45_stage5(_t: float, y: np.ndarray, ctx: AirdropContext) -> np.ndarray:
 
     mv = mjs + msh + msy - me
     relative_velocity = y[4] - y[3]
-    fl = dmi * relative_velocity**2 + fsh
+    deployment_rate = max(relative_velocity, 0.0)
+
+    fl = dmi * deployment_rate**2 + fsh
     relative_damping = STAGE5_RELATIVE_DAMPING * relative_velocity
+
     dy = np.zeros(6, dtype=float)
     dy[0] = y[4] * cos(y[2])
     dy[1] = y[4] * sin(y[2])
@@ -123,7 +126,7 @@ def ode45_stage5(_t: float, y: np.ndarray, ctx: AirdropContext) -> np.ndarray:
         dy[4] = g * sin(y[2]) - (qw + qe + fl) / (mw + me) - relative_damping
     else:
         dy[4] = g * sin(y[2]) - (qw + qe + qjs + fl) / (mw + me) - relative_damping
-    dy[5] = sqrt((fl - fsh) / dmi)
+    dy[5] = deployment_rate
     return dy
 
 
@@ -157,22 +160,59 @@ def zhusan_straight(
     initial[4] = initial_speed
     initial[5] = data_jslz[5]
 
-
-
-
-
     lxt = main_length + dece_length
     t_grid = matlab_time_grid(0.0, sim.time, sim.step)
-    time_5, data_5 = solve_on_matlab_grid(
+
+    def main_straightening_complete_event(
+        _t: float,
+        y: np.ndarray,
+    ) -> float:
+        # y[5] 是当前已经拉出的伞系统长度。
+        return float(y[5] - lxt)
+
+    # 达到主伞整理长度后立即结束本阶段。
+    main_straightening_complete_event.terminal = True
+    main_straightening_complete_event.direction = 1
+
+    solution = solve_on_matlab_grid(
         lambda t, y: ode45_stage5(t, y, ctx),
         t_grid,
         initial,
+        events=main_straightening_complete_event,
+        return_result=True,
     )
 
-    hit = np.nonzero(data_5[:, 5] >= lxt)[0]
-    if hit.size == 0:
-        raise RuntimeError("zhusan_straight did not reach the MATLAB stop condition")
-    n = int(hit[0])
+    if (
+        len(solution.t_events) == 0
+        or solution.t_events[0].size == 0
+    ):
+        raise RuntimeError(
+            "zhusan_straight did not reach the "
+            "main-straightening-complete event"
+        )
+
+    time_mslz = float(solution.t_events[0][0])
+    event_state = solution.y_events[0][0].copy()
+
+    time_5 = solution.t.copy()
+    data_5 = solution.y.T.copy()
+
+    # t_eval 通常不包含非固定网格上的准确事件点。
+    if (
+        time_5.size == 0
+        or not np.isclose(
+            time_5[-1],
+            time_mslz,
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+    ):
+        time_5 = np.append(time_5, time_mslz)
+        data_5 = np.vstack((data_5, event_state))
+
+    # 追加事件点后，最后一行就是本阶段终止状态。
+    n = len(time_5) - 1
+
 
     angle_vehicle = np.zeros(n + 1, dtype=float)
     angular_velocity = np.zeros(n + 1, dtype=float)

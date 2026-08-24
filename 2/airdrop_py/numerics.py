@@ -128,13 +128,15 @@ def matlab_time_grid(start: float, stop: float, step: float) -> np.ndarray:
     count = int(np.floor((stop - start) / step + 1e-12)) + 1
     return start + np.arange(count, dtype=float) * step
 
-
+# 把 solve_on_matlab_grid 改成支持 events，并在需要时把 solve_ivp 的结果对象返回出来：
 def solve_on_matlab_grid(
     fun: Callable[[float, np.ndarray], np.ndarray],
     t_grid: np.ndarray,
     initial: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Solve an ODE and return data as ``(time, rows_by_state)`` like MATLAB."""
+    *,
+    events=None,
+    return_result: bool = False,
+) -> tuple[np.ndarray, np.ndarray] | object:
 
     first_step = (
         abs(float(t_grid[1]) - float(t_grid[0]))
@@ -147,18 +149,14 @@ def solve_on_matlab_grid(
         np.asarray(initial, dtype=float),
         method=MatlabRK45,
         t_eval=t_grid,
-        # MATLAB receives the full vector ``0:step:sim_time`` as tspan.
-        # Its first integration step is constrained by the first requested
-        # output interval; passing only the two endpoints changes the
-        # adaptive trajectory at discontinuous stage boundaries.
+        events=events,
         first_step=first_step,
         rtol=1e-3,
         atol=1e-6,
-        # MATLAB ode45 defaults MaxStep to 10% of the integration interval.
-        # Leaving this infinite lets SciPy take a much larger step than MATLAB
-        # and changes the interpolated values on the fixed output grid.
         max_step=0.1 * abs(float(t_grid[-1]) - float(t_grid[0])),
     )
     if not result.success:
         raise RuntimeError(result.message)
+    if return_result:
+        return result
     return result.t, result.y.T

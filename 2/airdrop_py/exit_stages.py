@@ -21,14 +21,14 @@ def ode45_stage1(_t: float, y: np.ndarray, ctx: AirdropContext) -> np.ndarray:
     drop_envi = ctx.drop_envi
     vehicle = ctx.vehicle
     pullchute = ctx.pullchute
-
-    chute_k = pullchute.resist * pullchute.area
-    velocity = drop_envi.airplane_velo / 3.6
-    alfa0 = drop_envi.cargo_angle * pi / 180.0
-    mass = vehicle.dropmass * 1000.0
-    grav1 = drop_envi.grav * (1.0 - drop_envi.drophight / drop_envi.earth_r)
-    gravity_force = vehicle.dropmass * grav1
-    d_temp = 6.5e-3
+    
+    chute_k = pullchute.resist * pullchute.area     #降落伞阻力系数
+    velocity = drop_envi.airplane_velo / 3.6        #空投运输机速度转化km/h
+    alfa0 = drop_envi.cargo_angle * pi / 180.0      #运输机货舱与水平面夹角转换：角度->弧度
+    mass = vehicle.dropmass * 1000.0                #空投车质量转换：kg->g
+    grav1 = drop_envi.grav * (1.0 - drop_envi.drophight / drop_envi.earth_r)  
+    gravity_force = vehicle.dropmass * grav1         
+    d_temp = 6.5e-3                                  #大气温度湿度系数
     t0 = 273.0
     h = drop_envi.drophight
     rho = drop_envi.air_density * (1.0 - d_temp * h / t0) ** 4.26
@@ -119,7 +119,6 @@ def stage_revote(
     data_stage_1: np.ndarray,
     ctx: AirdropContext,
 ) -> tuple[float, np.ndarray, np.ndarray, np.ndarray]:
-    """Run the exit rotation stage and return its MATLAB-compatible outputs."""
 
     vehicle = ctx.vehicle
     drop_envi = ctx.drop_envi
@@ -132,28 +131,51 @@ def stage_revote(
 
     initial = np.zeros(6, dtype=float)
     initial[0] = 0.0
-    initial[1] = 0.0
-    initial[2] = data_stage_1[2]
-    initial[3] = data_stage_1[3]
+    initial[1] = data_stage_1[1] #继承阶段一x速度
+    initial[2] = data_stage_1[2] #继承阶段一y位置
+    initial[3] = data_stage_1[3] #继承阶段一y速度
     initial[4] = alfa
     initial[5] = 0.0
 
     t_grid = matlab_time_grid(0.0, sim.time / 5.0, sim.step)
-    time_2, data_2 = solve_on_matlab_grid(lambda t, y: ode45_stage2(t, y, ctx), t_grid, initial)
 
     gama = atan(hm / (lt - lp))
     po = sqrt(hm**2 + (lt - lp) ** 2)
-    x_cm_back = data_2[:, 0] + po * np.cos(data_2[:, 4] - gama)
-    hit = np.nonzero(x_cm_back <= 0.0)[0]
-    if hit.size == 0:
-        raise RuntimeError("stage_revote did not reach the MATLAB stop condition")
-    idx = int(hit[0])
 
-    data_fz = np.zeros(6, dtype=float)
-    data_fz[0] = data_2[idx, 0] + data_stage_1[0]
-    data_fz[1] = data_2[idx, 1] + data_stage_1[1]
-    data_fz[2] = data_2[idx, 2]
-    data_fz[3] = data_2[idx, 3]
-    data_fz[4] = data_2[idx, 4]
-    data_fz[5] = data_2[idx, 5]
-    return float(time_2[idx]), data_fz, time_2, data_2
+    def rear_contact_event(_t: float, y: np.ndarray) -> float:
+        return float(y[0] + po * cos(y[4] - gama))
+
+    rear_contact_event.terminal = True
+    rear_contact_event.direction = -1
+
+    result = solve_on_matlab_grid(
+        lambda t, y: ode45_stage2(t, y, ctx),
+        t_grid,
+        initial,
+        events=rear_contact_event,
+        return_result=True,
+    )
+
+    if len(result.t_events)== 0 or len(result.t_events[0])==0:
+        raise RuntimeError("stage_revote did not reach the MATLAB stop condition")
+
+    time_fz = float(result.t_events[0][0])
+    events_state = result.y_events[0][0].copy()
+
+    time_2 = result.t.copy()
+    data_2 = result.y.T.copy()
+
+    # t_eval 只返回固定网格点，事件时刻通常不在固定网格上。
+    if time_2.size == 0 or not np.isclose(time_2[-1], time_fz):
+        time_2 = np.append(time_2, time_fz)
+        data_2 = np.vstack((data_2, events_state))
+
+    data_fz = events_state.copy()
+
+    #阶段二的 X 位移从 0 重新计数，因此转换为累计相对位移。
+
+    data_fz[0] += data_stage_1[0]
+
+    # data_fz[1] 不再加 data_stage_1[1]：
+    # 阶段二 initial[1] 已经继承了阶段一 X 速度。
+    return time_fz, data_fz, time_2, data_2
