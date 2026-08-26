@@ -60,13 +60,30 @@ DEFAULT_ZHS_P = [
 DEFAULT_SIM_P = [50, 0.001]
 
 
-def _parse_vector_text(text: str, *, expected_length: int, name: str) -> list[float]:
+def _expected_lengths(
+    expected_length: int | tuple[int, ...],
+) -> tuple[int, ...]:
+    return (
+        (expected_length,)
+        if isinstance(expected_length, int)
+        else tuple(expected_length)
+    )
+
+
+def _parse_vector_text(
+    text: str,
+    *,
+    expected_length: int | tuple[int, ...],
+    name: str,
+) -> list[float]:
     """Parse one comma/space separated parameter vector from user input."""
 
-    parts = [part for part in re.split(r"[\s,，]+", text.strip()) if part]
+    parts = [part for part in re.split(r"[\s,，,]+", text.strip()) if part]
     values = [float(part) for part in parts]
-    if len(values) != expected_length:
-        raise ValueError(f"{name} must contain {expected_length} values; got {len(values)}")
+    expected = _expected_lengths(expected_length)
+    if len(values) not in expected:
+        expected_text = " or ".join(str(length) for length in expected)
+        raise ValueError(f"{name} must contain {expected_text} values; got {len(values)}")
     if not np.all(np.isfinite(values)):
         raise ValueError(f"{name} must contain only finite numeric values")
     return values
@@ -76,19 +93,22 @@ def prompt_vector(
     name: str,
     default: list[float],
     *,
+    expected_length: int | tuple[int, ...] | None = None,
     input_func: Callable[[str], str] = input,
 ) -> list[float]:
     """Prompt for one parameter vector and fall back to the default on Enter."""
 
+    expected = _expected_lengths(len(default) if expected_length is None else expected_length)
+    expected_text = " or ".join(str(length) for length in expected)
     default_text = ", ".join(str(value) for value in default)
-    print(f"{name} [{len(default)} values]")
+    print(f"{name} [{expected_text} values]")
     print(f"  default: {default_text}")
     while True:
         raw = input_func("  enter values, or press Enter to keep default: ").strip()
         if not raw:
             return list(default)
         try:
-            return _parse_vector_text(raw, expected_length=len(default), name=name)
+            return _parse_vector_text(raw, expected_length=expected, name=name)
         except ValueError as exc:
             print(f"  invalid input: {exc}")
 
@@ -104,6 +124,6 @@ def prompt_all_defaults(
         prompt_vector("vel_p", DEFAULT_VEL_P, input_func=input_func),
         prompt_vector("qys_p", DEFAULT_QYS_P, input_func=input_func),
         prompt_vector("jss_p", DEFAULT_JSS_P, input_func=input_func),
-        prompt_vector("zhs_p", DEFAULT_ZHS_P, input_func=input_func),
+        prompt_vector("zhs_p", DEFAULT_ZHS_P, expected_length=(19, 20), input_func=input_func),
         prompt_vector("sim_p", DEFAULT_SIM_P, input_func=input_func),
     )
