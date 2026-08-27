@@ -10,9 +10,9 @@ from .numerics import matlab_time_grid, solve_on_matlab_grid
 
 #阻尼
 STAGE5_RELATIVE_DAMPING = 0.15
-STAGE5_ANGULAR_DAMPING = 0.02
+STAGE5_ANGULAR_DAMPING = 0.5
 STAGE6_SPEED_DAMPING = 0.1
-STAGE6_ANGULAR_DAMPING = 0.02
+STAGE6_ANGULAR_DAMPING = 0.5
 
 
 def _nonzero(value: float, minimum: float = 1.0e-9) -> float:
@@ -21,6 +21,35 @@ def _nonzero(value: float, minimum: float = 1.0e-9) -> float:
     if abs(value) >= minimum:
         return value
     return minimum if value >= 0.0 else -minimum
+
+
+def mainchute_inflation_state(
+    t: float,
+    t1: float,
+    step_open: float,
+    t21: float,
+    area: float,
+    khalf: float,
+) -> tuple[float, float]:
+    """Return effective main-chute area and area growth rate."""
+
+    if t <= 0.0:
+        return 0.0, 0.0
+
+    half_area = area * khalf
+    t2 = t1 + step_open
+    t3 = t2 + t21
+
+    if t <= t1:
+        return half_area * t / t1, half_area / t1
+    if t <= t2:
+        return half_area, 0.0
+    if t <= t3 and t21 > 0.0:
+        ratio = (t - t2) / t21
+        sm = half_area + area * (1.0 - khalf) * ratio**2
+        dsm = 2.5 * area * (1.0 - khalf) * ratio
+        return sm, dsm
+    return area, 0.0
 
 
 def _mainchute_lengths(ctx: AirdropContext) -> tuple[float, float, float]:
@@ -353,32 +382,21 @@ def ode45_stage6(
         + vehicle.hull_l * cos(-pi / 2.0 + y[2]) * vehicle.hull_w
     )
     ca_mst = mainchute.resist_ca * mainchute.chute_aera
-    ks = mainchute.chute_aera * mainchute.khalf
     velocity_start = float(data_stage_55[4])
     # [first.m 源码迁移]
     # first.m 第 1391 行明确写的是：
     #     k_ks = mainchute.k_ks;
     # 这里直接按源码使用主伞参数。
     t1 = mainchute.k_ks * sqrt(mainchute.khalf * ca_mst) / velocity_start
-    t2 = t1 + mainchute.step_open
-    t3 = t2 + t21
-
-    if t <= t1:
-        sm = ks * t / t1
-        dsm = ks / t1
-    elif t <= t2:
-        sm = ks
-        dsm = 0.0
-    elif t <= t3 and t21 > 0.0:
-        sm = ks + mainchute.chute_aera * (1.0 - mainchute.khalf) * (
-            (t - t2) / t21
-        ) ** 2
-        dsm = 2.5 * mainchute.chute_aera * (1.0 - mainchute.khalf) * (
-            (t - t2) / t21
-        )
-    else:
-        sm = mainchute.chute_aera
-        dsm = 0.0
+    effective_t = max(t - mainchute.deploy_delay, 0.0)
+    sm, dsm = mainchute_inflation_state(
+        effective_t,
+        t1,
+        mainchute.step_open,
+        t21,
+        mainchute.chute_aera,
+        mainchute.khalf,
+    )
 
     ca_ms = (
         mainchute.resist_ca
@@ -407,7 +425,7 @@ def ode45_stage6(
         g * sin(y[2]) * m_act / m_all
         - (qms + qwq + qjs) / m_all
         - y[3] * dmsf / m_all
-        - STAGE6_SPEED_DAMPING * y[3]
+        - STAGE6_SPEED_DAMPING * (y[3] - velocity_start)
     )
     return dy
 
@@ -442,13 +460,13 @@ def zhusan_chongqi(
     # first.m 主程序把 k_ks 定义为 decechute.ks，并将其作为
     # ms_chuqi_para(23) 传入 zhusan_chongqi；函数第 436 行重新取出
     # 该参数，第 474 行直接用于外层后处理的 t1。
-    k_ks = decechute.ks
-    t1 = k_ks * sqrt(mainchute.khalf * ca_mst) / initial[3]
+    t1 = mainchute.k_ks * sqrt(mainchute.khalf * ca_mst) / initial[3]
     t2 = t1 + mainchute.step_open
 
     t_grid = matlab_time_grid(0.0, sim.time, sim.step)
     velocity_start = float(data_stage_4[4])
-    first_second_open = np.nonzero(t_grid > t2)[0]
+    second_open_time = mainchute.deploy_delay + t2
+    first_second_open = np.nonzero(t_grid > second_open_time)[0]
     if first_second_open.size == 0:
         raise RuntimeError("zhusan_chongqi did not reach the second inflation stage")
     velocity_index = max(int(first_second_open[0]) - 1, 0)
@@ -481,24 +499,23 @@ def zhusan_chongqi(
     dsm_values = np.zeros(n_total, dtype=float)
     ca_values = np.zeros(n_total, dtype=float)
 
-    ks = mainchute.chute_aera * mainchute.khalf
     t3 = t2 + t21
+    inflation_complete_time = mainchute.deploy_delay + t3
+    if n_total == 0 or time_6[-1] < inflation_complete_time:
+        raise RuntimeError(
+            "zhusan_chongqi simulation time is too short for main-chute "
+            f"inflation; need at least {inflation_complete_time:.6f} s"
+        )
     for i in range(1, n_total):
-        t = time_6[i]
-        if t <= t1:
-            sm = ks * t / t1
-            dsm = ks / t1
-        elif t <= t2:
-            sm = ks
-            dsm = 0.0
-        elif t <= t2 + t1:
-            sm = ks + mainchute.chute_aera * (1.0 - mainchute.khalf) * (
-                (t - t2) / t21
-            )
-            dsm = mainchute.chute_aera * (1.0 - mainchute.khalf) / t21
-        else:
-            sm = mainchute.chute_aera
-            dsm = 0.0
+        effective_t = max(time_6[i] - mainchute.deploy_delay, 0.0)
+        sm, dsm = mainchute_inflation_state(
+            effective_t,
+            t1,
+            mainchute.step_open,
+            t21,
+            mainchute.chute_aera,
+            mainchute.khalf,
+        )
         ca_values[i] = mainchute.resist_ca * yita * sm
         dsm_values[i] = dsm
         dt = time_6[i] - time_6[i - 1]
@@ -564,8 +581,12 @@ def zhusan_chongqi(
         angular_velocity[i] = angular_velocity[i - 1] + angular_acceleration * dt
         angle_vehicle[i] = angle_vehicle[i - 1] + angular_velocity[i - 1] * dt
 
-    # The MATLAB code finds the first stable point after eight seconds.
-    start = max(int(8.0 / sim.step) - 1, 0)
+    # Search only after the nominal stable window and full inflation.
+    start = max(
+        int(8.0 / sim.step) - 1,
+        int(np.searchsorted(time_6, inflation_complete_time, side="left")),
+        0,
+    )
     changes = np.abs(np.diff(fk))
     stable = np.nonzero(changes[start:] <= 1.0)[0]
     stop_index = int(start + stable[0]) if stable.size else n_total - 1

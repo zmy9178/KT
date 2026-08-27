@@ -99,6 +99,7 @@ class MainChute:
     k_ks: float
     n_ks: float
     step_open: float
+    deploy_delay: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -125,13 +126,19 @@ def as_parameter_vector(
     values: list[float] | np.ndarray,
     *,
     name: str,
-    expected_length: int,
+    expected_length: int | tuple[int, ...],
 ) -> np.ndarray:
     """Convert one MATLAB input vector to a validated 1-D float array."""
 
     vector = np.asarray(values, dtype=float).reshape(-1)
-    if vector.size != expected_length:
-        raise ValueError(f"{name} must contain {expected_length} values; got {vector.size}")
+    expected_lengths = (
+        (expected_length,)
+        if isinstance(expected_length, int)
+        else tuple(expected_length)
+    )
+    if vector.size not in expected_lengths:
+        expected_text = " or ".join(str(length) for length in expected_lengths)
+        raise ValueError(f"{name} must contain {expected_text} values; got {vector.size}")
     if not np.all(np.isfinite(vector)):
         raise ValueError(f"{name} must contain only finite numeric values")
     return vector
@@ -151,10 +158,19 @@ def build_context(
     vel_p = as_parameter_vector(vel_p, name="vel_p", expected_length=19)
     qys_p = as_parameter_vector(qys_p, name="qys_p", expected_length=4)
     jss_p = as_parameter_vector(jss_p, name="jss_p", expected_length=11)
-    zhs_p = as_parameter_vector(zhs_p, name="zhs_p", expected_length=19)
+    zhs_p = as_parameter_vector(zhs_p, name="zhs_p", expected_length=(19, 20))
     sim_p = as_parameter_vector(sim_p, name="sim_p", expected_length=2)
     if sim_p[0] <= 0.0 or sim_p[1] <= 0.0:
         raise ValueError("sim_p time and step must both be positive")
+    deploy_delay = float(zhs_p[19]) if zhs_p.size == 20 else 0.0
+    if zhs_p[16] <= 0.0:
+        raise ValueError("mainchute k_ks must be positive")
+    if zhs_p[17] <= 0.0:
+        raise ValueError("mainchute n_ks must be positive")
+    if zhs_p[18] < 0.0:
+        raise ValueError("mainchute step_open must be non-negative")
+    if deploy_delay < 0.0:
+        raise ValueError("mainchute deploy_delay must be non-negative")
 
     land_hight = kte_p[0]
     earth_mass = 5.97e24
@@ -242,6 +258,7 @@ def build_context(
             k_ks=zhs_p[16],
             n_ks=zhs_p[17],
             step_open=zhs_p[18],
+            deploy_delay=deploy_delay,
         ),
         sim=SimulationConfig(time=sim_p[0], step=sim_p[1]),
     )
