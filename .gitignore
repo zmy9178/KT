@@ -1,0 +1,27 @@
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Local virtual environments
+.venv/
+venv/
+
+# Simulation outputs and local data
+*.csv
+*.npz
+*.png
+*.mat
+*.xlsx
+*.log
+tmp/
+debug/
+
+# .NET build outputs
+bin/
+obj/
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
